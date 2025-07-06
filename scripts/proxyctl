@@ -1,0 +1,136 @@
+#!/bin/bash
+
+PLIST_NAME="com.localproxy.service"
+PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+INSTALL_DIR="/usr/local/lib/local-proxy"
+DNSMASQ_CONFIG="/opt/homebrew/etc/dnsmasq.d/proxy.conf"
+DNSMASQ_LOG="/opt/homebrew/var/log/dnsmasq.log"
+
+# DNS management functions
+start_dns() {
+    if pgrep -f "dnsmasq.*proxy.conf" > /dev/null; then
+        echo "  DNS service already running"
+        return 0
+    fi
+    
+    echo "  Starting DNS interception..."
+    if [ -f "/opt/homebrew/sbin/dnsmasq" ]; then
+        sudo /opt/homebrew/sbin/dnsmasq -C "$DNSMASQ_CONFIG" --keep-in-foreground &
+        sleep 1
+        if pgrep -f "dnsmasq.*proxy.conf" > /dev/null; then
+            echo "  DNS service started on port 5353"
+        else
+            echo "  Warning: DNS service may have failed to start"
+        fi
+    else
+        echo "  Warning: dnsmasq not found, DNS interception unavailable"
+    fi
+}
+
+stop_dns() {
+    echo "  Stopping DNS interception..."
+    sudo pkill -f "dnsmasq.*proxy.conf" 2>/dev/null || true
+    echo "  DNS service stopped"
+}
+
+check_dns_status() {
+    if pgrep -f "dnsmasq.*proxy.conf" > /dev/null; then
+        echo "  DNS interception: Running on port 5353"
+        return 0
+    else
+        echo "  DNS interception: Not running"
+        return 1
+    fi
+}
+
+case "$1" in
+    start)
+        echo "Starting local proxy service..."
+        launchctl load "$PLIST_PATH"
+        echo "HTTP/HTTPS proxy started"
+        start_dns
+        echo "Proxy services started successfully"
+        ;;
+    stop)
+        echo "Stopping local proxy service..."
+        stop_dns
+        launchctl unload "$PLIST_PATH"
+        echo "Proxy services stopped successfully"
+        ;;
+    restart)
+        echo "Restarting local proxy service..."
+        stop_dns
+        launchctl unload "$PLIST_PATH" 2>/dev/null || true
+        launchctl load "$PLIST_PATH"
+        start_dns
+        echo "Proxy services restarted successfully"
+        ;;
+    status)
+        echo "Proxy Service Status:"
+        echo "===================="
+        if launchctl list | grep -q "$PLIST_NAME"; then
+            echo "HTTP/HTTPS proxy: Running on port 8080"
+            http_status=0
+        else
+            echo "HTTP/HTTPS proxy: Not running"
+            http_status=1
+        fi
+        
+        check_dns_status
+        dns_status=$?
+        
+        if [ $http_status -eq 0 ] && [ $dns_status -eq 0 ]; then
+            echo "Overall status: All services running"
+            exit 0
+        elif [ $http_status -eq 0 ] || [ $dns_status -eq 0 ]; then
+            echo "Overall status: Partially running"
+            exit 1
+        else
+            echo "Overall status: All services stopped"
+            exit 1
+        fi
+        ;;
+    enable-proxy)
+        echo "Enabling system proxy..."
+        sudo "$INSTALL_DIR/scripts/proxy-config.sh" enable
+        ;;
+    disable-proxy)
+        echo "Disabling system proxy..."
+        sudo "$INSTALL_DIR/scripts/proxy-config.sh" disable
+        ;;
+    proxy-status)
+        "$INSTALL_DIR/scripts/proxy-config.sh" status
+        ;;
+    logs)
+        tail -f "/usr/local/var/log/local-proxy/transactions.log"
+        ;;
+    dns-logs)
+        if [ -f "$DNSMASQ_LOG" ]; then
+            echo "DNS Query Logs:"
+            echo "==============="
+            tail -f "$DNSMASQ_LOG"
+        else
+            echo "DNS logs not available. Make sure DNS service is running."
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|enable-proxy|disable-proxy|proxy-status|logs|dns-logs}"
+        echo ""
+        echo "Service commands:"
+        echo "  start         Start HTTP/HTTPS proxy and DNS interception"
+        echo "  stop          Stop all proxy services"
+        echo "  restart       Restart all proxy services"
+        echo "  status        Show status of all services"
+        echo ""
+        echo "Proxy commands:"
+        echo "  enable-proxy  Configure system to use local proxy"
+        echo "  disable-proxy Remove system proxy configuration"
+        echo "  proxy-status  Show current proxy configuration"
+        echo ""
+        echo "Monitoring:"
+        echo "  logs          Show live HTTP/HTTPS transaction logs"
+        echo "  dns-logs      Show live DNS query logs"
+        exit 1
+        ;;
+esac

@@ -148,74 +148,8 @@ EOF
 setup_cli_commands() {
     print_status "Setting up CLI commands..."
     
-    # Create wrapper script for proxy management
-    sudo tee "$BIN_DIR/proxyctl" > /dev/null << 'EOF'
-#!/bin/bash
-
-PLIST_NAME="com.localproxy.service"
-PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
-INSTALL_DIR="/usr/local/lib/local-proxy"
-
-case "$1" in
-    start)
-        echo "Starting local proxy service..."
-        launchctl load "$PLIST_PATH"
-        echo "Service started"
-        ;;
-    stop)
-        echo "Stopping local proxy service..."
-        launchctl unload "$PLIST_PATH"
-        echo "Service stopped"
-        ;;
-    restart)
-        echo "Restarting local proxy service..."
-        launchctl unload "$PLIST_PATH" 2>/dev/null || true
-        launchctl load "$PLIST_PATH"
-        echo "Service restarted"
-        ;;
-    status)
-        if launchctl list | grep -q "$PLIST_NAME"; then
-            echo "Local proxy service is running"
-            exit 0
-        else
-            echo "Local proxy service is not running"
-            exit 1
-        fi
-        ;;
-    enable-proxy)
-        echo "Enabling system proxy..."
-        sudo "$INSTALL_DIR/scripts/proxy-config.sh" enable
-        ;;
-    disable-proxy)
-        echo "Disabling system proxy..."
-        sudo "$INSTALL_DIR/scripts/proxy-config.sh" disable
-        ;;
-    proxy-status)
-        "$INSTALL_DIR/scripts/proxy-config.sh" status
-        ;;
-    logs)
-        tail -f "/usr/local/var/log/local-proxy/transactions.log"
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status|enable-proxy|disable-proxy|proxy-status|logs}"
-        echo ""
-        echo "Service commands:"
-        echo "  start         Start the local proxy service"
-        echo "  stop          Stop the local proxy service"
-        echo "  restart       Restart the local proxy service"
-        echo "  status        Show service status"
-        echo ""
-        echo "Proxy commands:"
-        echo "  enable-proxy  Configure system to use local proxy"
-        echo "  disable-proxy Remove system proxy configuration"
-        echo "  proxy-status  Show current proxy configuration"
-        echo ""
-        echo "Monitoring:"
-        echo "  logs          Show live transaction logs"
-        exit 1
-        ;;
-esac
-EOF
+    # Create wrapper script for proxy management with DNS integration
+    sudo cp "$SCRIPT_DIR/proxyctl" "$BIN_DIR/proxyctl"
     
     sudo chmod +x "$BIN_DIR/proxyctl"
     print_status "CLI commands set up"
