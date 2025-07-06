@@ -103,6 +103,8 @@ copy_files() {
 create_launchd_plist() {
     print_status "Creating launchd service..."
     
+    NODE_PATH=$(which node)
+    
     cat > "$PLIST_PATH" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,7 +114,7 @@ create_launchd_plist() {
     <string>$PLIST_NAME</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/node</string>
+        <string>$NODE_PATH</string>
         <string>$INSTALL_DIR/index.js</string>
     </array>
     <key>WorkingDirectory</key>
