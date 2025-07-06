@@ -5,8 +5,44 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
 INSTALL_DIR="/usr/local/lib/local-proxy"
 DNSMASQ_CONFIG="/opt/homebrew/etc/dnsmasq.d/proxy.conf"
 DNSMASQ_LOG="/opt/homebrew/var/log/dnsmasq.log"
+DNS_BACKUP_FILE="/tmp/proxy-dns-backup.txt"
 
 # DNS management functions
+backup_dns_servers() {
+    echo "  Backing up current DNS servers..."
+    networksetup -getdnsservers Wi-Fi > "$DNS_BACKUP_FILE"
+    if [ -s "$DNS_BACKUP_FILE" ]; then
+        echo "  DNS servers backed up to $DNS_BACKUP_FILE"
+    else
+        echo "  No DNS servers configured, using defaults"
+        echo "8.8.8.8 8.8.4.4" > "$DNS_BACKUP_FILE"
+    fi
+}
+
+restore_dns_servers() {
+    echo "  Restoring original DNS servers..."
+    if [ -f "$DNS_BACKUP_FILE" ]; then
+        if grep -q "There aren't any DNS Servers set" "$DNS_BACKUP_FILE"; then
+            sudo networksetup -setdnsservers Wi-Fi "Empty"
+            echo "  DNS servers cleared (using DHCP)"
+        else
+            dns_servers=$(cat "$DNS_BACKUP_FILE" | tr '\n' ' ')
+            sudo networksetup -setdnsservers Wi-Fi $dns_servers
+            echo "  DNS servers restored: $dns_servers"
+        fi
+        rm -f "$DNS_BACKUP_FILE"
+    else
+        echo "  Warning: No DNS backup found, using defaults"
+        sudo networksetup -setdnsservers Wi-Fi 8.8.8.8 8.8.4.4
+    fi
+}
+
+set_proxy_dns() {
+    echo "  Setting system DNS to use local dnsmasq..."
+    sudo networksetup -setdnsservers Wi-Fi 127.0.0.1
+    echo "  System DNS configured to use 127.0.0.1"
+}
+
 start_dns() {
     if pgrep -f "dnsmasq.*proxy.conf" > /dev/null; then
         echo "  DNS service already running"
@@ -18,7 +54,8 @@ start_dns() {
         sudo /opt/homebrew/sbin/dnsmasq -C "$DNSMASQ_CONFIG" --keep-in-foreground &
         sleep 1
         if pgrep -f "dnsmasq.*proxy.conf" > /dev/null; then
-            echo "  DNS service started on port 5353"
+            echo "  DNS service started on port 53"
+            set_proxy_dns
         else
             echo "  Warning: DNS service may have failed to start"
         fi
@@ -29,13 +66,19 @@ start_dns() {
 
 stop_dns() {
     echo "  Stopping DNS interception..."
+    restore_dns_servers
     sudo pkill -f "dnsmasq.*proxy.conf" 2>/dev/null || true
     echo "  DNS service stopped"
 }
 
 check_dns_status() {
     if pgrep -f "dnsmasq.*proxy.conf" > /dev/null; then
-        echo "  DNS interception: Running on port 5353"
+        current_dns=$(networksetup -getdnsservers Wi-Fi | head -1)
+        if [ "$current_dns" = "127.0.0.1" ]; then
+            echo "  DNS interception: Running on port 53 (system configured)"
+        else
+            echo "  DNS interception: Running on port 53 (system not configured)"
+        fi
         return 0
     else
         echo "  DNS interception: Not running"
@@ -46,6 +89,7 @@ check_dns_status() {
 case "$1" in
     start)
         echo "Starting local proxy service..."
+        backup_dns_servers
         launchctl load "$PLIST_PATH"
         echo "HTTP/HTTPS proxy started"
         start_dns
