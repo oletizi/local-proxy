@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -8,6 +41,8 @@ const express_1 = __importDefault(require("express"));
 const http_proxy_middleware_1 = require("http-proxy-middleware");
 const cors_1 = __importDefault(require("cors"));
 const uuid_1 = require("uuid");
+const http = __importStar(require("http"));
+const net = __importStar(require("net"));
 const logger_1 = require("./logger");
 const system_proxy_1 = require("./system-proxy");
 class LocalProxy {
@@ -17,8 +52,10 @@ class LocalProxy {
         this.logger = new logger_1.ProxyLogger(config);
         this.systemProxyManager = new system_proxy_1.SystemProxyManager(this.logger);
         this.app = (0, express_1.default)();
+        this.server = http.createServer(this.app);
         this.setupMiddleware();
         this.setupRoutes();
+        this.setupHttpsProxy();
     }
     setupMiddleware() {
         this.app.use((0, cors_1.default)());
@@ -138,16 +175,141 @@ class LocalProxy {
                 });
             }
         };
+        // API-based forwarding
         this.app.use('/proxy/forward', (0, http_proxy_middleware_1.createProxyMiddleware)(proxyOptions));
+        // Catch-all proxy for system proxy usage
+        const systemProxyOptions = {
+            target: undefined,
+            changeOrigin: true,
+            router: (req) => {
+                // Skip proxy routes
+                if (req.url.startsWith('/proxy/')) {
+                    return undefined;
+                }
+                // Extract target URL from request
+                const host = req.headers.host;
+                const protocol = req.headers['x-forwarded-proto'] || 'http';
+                if (!host) {
+                    throw new Error('No host header found');
+                }
+                return `${protocol}://${host}`;
+            },
+            onError: (err, req, res) => {
+                this.logger.error('System proxy error', { error: err.message, url: req.url });
+                if (res && !res.headersSent) {
+                    res.status(502).end();
+                }
+            },
+            onProxyReq: (proxyReq, req, res) => {
+                this.logger.debug('System proxying request', {
+                    method: req.method,
+                    url: req.url,
+                    host: req.headers.host
+                });
+            }
+        };
+        // Apply system proxy middleware to all non-proxy routes
+        this.app.use((req, res, next) => {
+            if (req.url.startsWith('/proxy/')) {
+                next();
+            }
+            else {
+                (0, http_proxy_middleware_1.createProxyMiddleware)(systemProxyOptions)(req, res, next);
+            }
+        });
+    }
+    setupHttpsProxy() {
+        // Handle CONNECT requests for HTTPS tunneling
+        this.server.on('connect', (request, clientSocket, head) => {
+            const transactionId = (0, uuid_1.v4)();
+            const url = request.url || '';
+            const [hostname, port] = url.split(':');
+            const targetPort = parseInt(port) || 443;
+            this.logger.debug('HTTPS CONNECT request', {
+                transactionId,
+                hostname,
+                port: targetPort,
+                url
+            });
+            // Log the CONNECT request
+            const requestLog = {
+                timestamp: new Date().toISOString(),
+                method: 'CONNECT',
+                url: url,
+                headers: request.headers,
+                body: undefined,
+                sourceIp: clientSocket.remoteAddress || 'unknown',
+                userAgent: request.headers['user-agent']
+            };
+            const transaction = {
+                id: transactionId,
+                request: requestLog
+            };
+            this.transactions.set(transactionId, transaction);
+            // Create connection to target server
+            const serverSocket = new net.Socket();
+            serverSocket.connect(targetPort, hostname, () => {
+                // Send 200 Connection Established response
+                clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+                // Log successful connection
+                const responseLog = {
+                    timestamp: new Date().toISOString(),
+                    statusCode: 200,
+                    headers: {},
+                    body: 'Connection Established',
+                    responseTime: Date.now() - new Date(requestLog.timestamp).getTime()
+                };
+                transaction.response = responseLog;
+                this.logger.logTransaction(transaction);
+                this.transactions.delete(transactionId);
+                // Pipe data between client and server
+                serverSocket.pipe(clientSocket);
+                clientSocket.pipe(serverSocket);
+            });
+            serverSocket.on('error', (err) => {
+                this.logger.error('HTTPS tunnel error', {
+                    transactionId,
+                    hostname,
+                    port: targetPort,
+                    error: err.message
+                });
+                // Log failed connection
+                const responseLog = {
+                    timestamp: new Date().toISOString(),
+                    statusCode: 502,
+                    headers: {},
+                    body: `Tunnel Error: ${err.message}`,
+                    responseTime: Date.now() - new Date(requestLog.timestamp).getTime()
+                };
+                transaction.response = responseLog;
+                this.logger.logTransaction(transaction);
+                this.transactions.delete(transactionId);
+                clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+            });
+            clientSocket.on('error', (err) => {
+                this.logger.error('Client socket error in HTTPS tunnel', {
+                    transactionId,
+                    error: err.message
+                });
+                serverSocket.destroy();
+            });
+            serverSocket.on('close', () => {
+                clientSocket.end();
+            });
+            clientSocket.on('close', () => {
+                serverSocket.destroy();
+            });
+        });
     }
     start() {
         return new Promise((resolve, reject) => {
             try {
-                this.app.listen(this.config.port, this.config.host, () => {
+                this.server.listen(this.config.port, this.config.host, () => {
                     this.logger.info(`Local proxy started`, {
                         host: this.config.host,
                         port: this.config.port,
-                        logLevel: this.config.logLevel
+                        logLevel: this.config.logLevel,
+                        httpsSupport: true
                     });
                     resolve();
                 });
